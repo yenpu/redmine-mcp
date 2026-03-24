@@ -1,18 +1,21 @@
 import { randomUUID } from 'node:crypto';
 import express from 'express';
+import helmet from 'helmet';
+import rateLimit from 'express-rate-limit';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
 import { loadConfig } from './config.js';
 import { RedmineClient } from './client/redmine-client.js';
 import { registerAllTools } from './tools/index.js';
+import { apiKeyAuthMiddleware } from './middleware/auth.js';
+import { createSessionTTLMiddleware, type SessionMeta } from './middleware/session-guard.js';
 
 const config = loadConfig();
-const client = new RedmineClient(config);
 
-const transports = new Map<string, StreamableHTTPServerTransport>();
+const sessions = new Map<string, SessionMeta>();
 
-function createMcpServer(): McpServer {
+function createMcpServer(client: RedmineClient): McpServer {
   const server = new McpServer(
     { name: 'redmine-mcp', version: '1.0.0' },
     { capabilities: { tools: {} } },
@@ -22,32 +25,47 @@ function createMcpServer(): McpServer {
 }
 
 const app = express();
-app.use(express.json());
+app.use(helmet());
+app.use(express.json({ limit: '1mb' }));
 
-app.post('/mcp', async (req, res) => {
+const mcpLimiter = rateLimit({
+  windowMs: 60_000,
+  max: 120,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { jsonrpc: '2.0', error: { code: -32029, message: 'Too Many Requests' }, id: null },
+});
+
+const sessionTTL = createSessionTTLMiddleware(sessions, config.SESSION_TTL_MS);
+
+app.post('/mcp', apiKeyAuthMiddleware, sessionTTL, mcpLimiter, async (req, res) => {
   try {
     const sessionId = req.headers['mcp-session-id'] as string | undefined;
 
-    if (sessionId && transports.has(sessionId)) {
-      const transport = transports.get(sessionId)!;
-      await transport.handleRequest(req, res, req.body);
+    if (sessionId && sessions.has(sessionId)) {
+      await sessions.get(sessionId)!.transport.handleRequest(req, res, req.body);
       return;
     }
 
     if (!sessionId && isInitializeRequest(req.body)) {
+      const client = new RedmineClient({
+        REDMINE_BASE_URL: config.REDMINE_BASE_URL,
+        REDMINE_API_KEY: req.redmineApiKey!,
+      });
+
       const transport = new StreamableHTTPServerTransport({
         sessionIdGenerator: () => randomUUID(),
         onsessioninitialized: (id) => {
-          transports.set(id, transport);
+          sessions.set(id, { transport, createdAt: Date.now(), lastUsedAt: Date.now() });
         },
       });
 
       transport.onclose = () => {
-        const id = [...transports.entries()].find(([, t]) => t === transport)?.[0];
-        if (id) transports.delete(id);
+        const id = [...sessions.entries()].find(([, m]) => m.transport === transport)?.[0];
+        if (id) sessions.delete(id);
       };
 
-      const server = createMcpServer();
+      const server = createMcpServer(client);
       await server.connect(transport);
       await transport.handleRequest(req, res, req.body);
       return;
@@ -70,29 +88,40 @@ app.post('/mcp', async (req, res) => {
   }
 });
 
-app.get('/mcp', async (req, res) => {
+app.get('/mcp', apiKeyAuthMiddleware, sessionTTL, mcpLimiter, async (req, res) => {
   const sessionId = req.headers['mcp-session-id'] as string | undefined;
-  if (!sessionId || !transports.has(sessionId)) {
+  if (!sessionId || !sessions.has(sessionId)) {
     res.status(400).json({ error: 'Missing or invalid session ID' });
     return;
   }
   try {
-    await transports.get(sessionId)!.handleRequest(req, res);
+    await sessions.get(sessionId)!.transport.handleRequest(req, res);
   } catch (err) {
     console.error('MCP GET error:', err);
     if (!res.headersSent) res.status(500).send('Internal server error');
   }
 });
 
-app.delete('/mcp', async (req, res) => {
+app.delete('/mcp', apiKeyAuthMiddleware, async (req, res) => {
   const sessionId = req.headers['mcp-session-id'] as string | undefined;
-  if (sessionId && transports.has(sessionId)) {
-    await transports.get(sessionId)!.close();
-    transports.delete(sessionId);
+  if (sessionId && sessions.has(sessionId)) {
+    await sessions.get(sessionId)!.transport.close();
+    sessions.delete(sessionId);
   }
   res.status(204).send();
 });
 
+// Evict expired sessions every 5 minutes
+setInterval(() => {
+  for (const [id, meta] of sessions) {
+    if (Date.now() - meta.createdAt > config.SESSION_TTL_MS) {
+      meta.transport.close().catch(() => {});
+      sessions.delete(id);
+    }
+  }
+}, 5 * 60_000);
+
+console.info('[AUTH] X-Redmine-API-Key auth active — each client must supply its own Redmine API key.');
 app.listen(config.PORT, config.HOST, () => {
   console.log(`Redmine MCP server running on http://${config.HOST}:${config.PORT}/mcp`);
 });

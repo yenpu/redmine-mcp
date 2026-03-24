@@ -1,4 +1,12 @@
 node_modules/
 dist/
-.env
 *.js.map
+*.tsbuildinfo
+
+.env*
+!.env.example
+
+.idea
+.claude
+.DS_Store
+coverage/

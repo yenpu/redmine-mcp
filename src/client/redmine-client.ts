@@ -1,6 +1,10 @@
 import axios, { AxiosInstance, AxiosError } from 'axios';
-import { Config } from '../config.js';
 import { UploadResponse } from './types.js';
+
+interface RedmineClientConfig {
+  REDMINE_BASE_URL: string;
+  REDMINE_API_KEY: string;
+}
 
 export class RedmineApiError extends Error {
   constructor(
@@ -16,7 +20,7 @@ export class RedmineApiError extends Error {
 export class RedmineClient {
   private readonly http: AxiosInstance;
 
-  constructor(config: Config) {
+  constructor(config: RedmineClientConfig) {
     this.http = axios.create({
       baseURL: config.REDMINE_BASE_URL,
       headers: {

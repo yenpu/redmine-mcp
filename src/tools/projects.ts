@@ -45,9 +45,9 @@ export function registerProjectTools(server: McpServer, client: RedmineClient): 
     'create_project',
     'Create a new project.',
     {
-      name: z.string().describe('Project name (required)'),
+      name: z.string().max(255).describe('Project name (required)'),
       identifier: z.string().describe('Project identifier - lowercase, letters, digits, dashes (required)'),
-      description: z.string().optional().describe('Project description'),
+      description: z.string().max(65535).optional().describe('Project description'),
       homepage: z.string().optional().describe('Project homepage URL'),
       is_public: z.boolean().optional().describe('Whether the project is public'),
       parent_id: z.number().int().optional().describe('Parent project ID'),
@@ -71,8 +71,8 @@ export function registerProjectTools(server: McpServer, client: RedmineClient): 
     'Update an existing project.',
     {
       id: z.union([z.string(), z.number()]).describe('Project ID or identifier'),
-      name: z.string().optional().describe('Project name'),
-      description: z.string().optional().describe('Project description'),
+      name: z.string().max(255).optional().describe('Project name'),
+      description: z.string().max(65535).optional().describe('Project description'),
       homepage: z.string().optional().describe('Project homepage URL'),
       is_public: z.boolean().optional().describe('Whether the project is public'),
       inherit_members: z.boolean().optional().describe('Inherit members from parent project'),

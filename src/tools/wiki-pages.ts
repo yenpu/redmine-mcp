@@ -50,7 +50,7 @@ export function registerWikiPageTools(server: McpServer, client: RedmineClient):
     {
       project_id: z.union([z.string(), z.number()]).describe('Project ID or identifier'),
       page_name: z.string().describe('Wiki page name/title'),
-      text: z.string().describe('Wiki page content in Textile or Markdown format (required)'),
+      text: z.string().max(1_000_000).describe('Wiki page content in Textile or Markdown format (required)'),
       comments: z.string().optional().describe('Edit comment for version history'),
       version: z.number().int().optional().describe('Current version number (for conflict detection)'),
     },

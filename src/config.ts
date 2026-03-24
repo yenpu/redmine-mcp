@@ -3,9 +3,9 @@ import { z } from 'zod';
 
 const ConfigSchema = z.object({
   REDMINE_BASE_URL: z.string().url(),
-  REDMINE_API_KEY: z.string().min(1),
   PORT: z.coerce.number().default(3000),
-  HOST: z.string().default('0.0.0.0'),
+  HOST: z.string().default('127.0.0.1'),
+  SESSION_TTL_MS: z.coerce.number().default(3_600_000),
   LOG_LEVEL: z.enum(['debug', 'info', 'warn', 'error']).default('info'),
 });
 

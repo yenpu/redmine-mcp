@@ -9,8 +9,8 @@ export function registerAttachmentTools(server: McpServer, client: RedmineClient
     'upload_attachment',
     'Upload a file to Redmine and get a token. Use the token when creating/updating issues or wiki pages to attach the file.',
     {
-      file_content_base64: z.string().describe('Base64-encoded file content'),
-      filename: z.string().describe('Filename including extension (e.g. "screenshot.png")'),
+      file_content_base64: z.string().max(14_000_000).describe('Base64-encoded file content (max ~10 MB)'),
+      filename: z.string().max(255).regex(/^[a-zA-Z0-9._\- ]+$/).describe('Filename including extension (e.g. "screenshot.png")'),
     },
     async ({ file_content_base64, filename }) => {
       try {
