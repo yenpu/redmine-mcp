@@ -2,7 +2,7 @@ import { z } from 'zod';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { RedmineClient } from '../client/redmine-client.js';
 import { IssuesResponse, IssueResponse } from '../client/types.js';
-import { handleToolError, toText } from '../utils/errors.js';
+import { handleToolError, toText, summarizeIssues } from '../utils/errors.js';
 
 export function registerIssueTools(server: McpServer, client: RedmineClient): void {
   server.tool(
@@ -29,7 +29,7 @@ export function registerIssueTools(server: McpServer, client: RedmineClient): vo
     async (args) => {
       try {
         const data = await client.get<IssuesResponse>('/issues', args as Record<string, unknown>);
-        return toText(data);
+        return summarizeIssues(data);
       } catch (err) {
         return handleToolError(err);
       }
