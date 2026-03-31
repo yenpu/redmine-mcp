@@ -13,6 +13,12 @@ import { createSessionTTLMiddleware, type SessionMeta } from './middleware/sessi
 
 const config = loadConfig();
 
+const SESSION_NOT_FOUND_RESPONSE = {
+  jsonrpc: '2.0',
+  error: { code: -32000, message: 'Session not found — please re-initialize' },
+  id: null,
+} as const;
+
 const sessions = new Map<string, SessionMeta>();
 
 function createMcpServer(client: RedmineClient): McpServer {
@@ -41,13 +47,19 @@ const sessionTTL = createSessionTTLMiddleware(sessions, config.SESSION_TTL_MS);
 app.post('/mcp', apiKeyAuthMiddleware, sessionTTL, mcpLimiter, async (req, res) => {
   try {
     const sessionId = req.headers['mcp-session-id'] as string | undefined;
+    const method = req.body?.method ?? (Array.isArray(req.body) ? 'batch' : 'unknown');
+    const sid = sessionId?.slice(0, 8) ?? 'none';
+    console.info(`[req] POST sid=${sid} method=${method} active=${sessions.size} exists=${sessionId ? sessions.has(sessionId) : 'n/a'}`);
 
-    if (sessionId && sessions.has(sessionId)) {
-      await sessions.get(sessionId)!.transport.handleRequest(req, res, req.body);
-      return;
-    }
+    // Initialize requests always create a fresh session, even if the
+    // client still carries a (possibly stale) session ID.
+    if (isInitializeRequest(req.body)) {
+      if (sessionId && sessions.has(sessionId)) {
+        const old = sessions.get(sessionId)!;
+        old.transport.close().catch((err) => console.warn('[session] transport.close error:', err));
+        sessions.delete(sessionId);
+      }
 
-    if (!sessionId && isInitializeRequest(req.body)) {
       const client = new RedmineClient({
         REDMINE_BASE_URL: config.REDMINE_BASE_URL,
         REDMINE_API_KEY: req.redmineApiKey!,
@@ -56,26 +68,53 @@ app.post('/mcp', apiKeyAuthMiddleware, sessionTTL, mcpLimiter, async (req, res) 
       const transport = new StreamableHTTPServerTransport({
         sessionIdGenerator: () => randomUUID(),
         onsessioninitialized: (id) => {
-          sessions.set(id, { transport, createdAt: Date.now(), lastUsedAt: Date.now() });
+          sessions.set(id, { transport, createdAt: Date.now() });
+          console.info(`[session] created: ${id.slice(0, 8)}`);
         },
       });
 
-      transport.onclose = () => {
-        const id = [...sessions.entries()].find(([, m]) => m.transport === transport)?.[0];
-        if (id) sessions.delete(id);
-      };
-
       const server = createMcpServer(client);
       await server.connect(transport);
+
+      // Chain our handlers AFTER server.connect() so the SDK's internal
+      // onclose / onerror handlers are preserved and called first.
+      const sdkOnClose = transport.onclose;
+      const sdkOnError = transport.onerror;
+
+      // Log only — do NOT delete the session here. onclose fires when
+      // transport.close() is called (explicit cleanup). Session removal
+      // is handled by the DELETE handler and TTL eviction.
+      transport.onclose = () => {
+        sdkOnClose?.();
+        console.info(`[session] transport closed: ${transport.sessionId?.slice(0, 8)}`);
+      };
+
+      transport.onerror = (err) => {
+        sdkOnError?.(err);
+        console.error(`[session] transport error on ${transport.sessionId?.slice(0, 8)}:`, err);
+      };
+
       await transport.handleRequest(req, res, req.body);
       return;
     }
 
-    res.status(400).json({
-      jsonrpc: '2.0',
-      error: { code: -32000, message: 'Bad Request: missing or invalid session' },
-      id: null,
-    });
+    const meta = sessionId ? sessions.get(sessionId) : undefined;
+    if (meta) {
+      try {
+        await meta.transport.handleRequest(req, res, req.body);
+      } catch (err) {
+        console.error(`[session] transport.handleRequest failed for ${sessionId?.slice(0, 8)}:`, err);
+        meta.transport.close().catch((err) => console.warn('[session] transport.close error:', err));
+        sessions.delete(sessionId!);
+        if (!res.headersSent) {
+          res.status(404).json(SESSION_NOT_FOUND_RESPONSE);
+        }
+      }
+      return;
+    }
+
+    console.warn(`[req] POST 404 — active=${sessions.size}`);
+    res.status(404).json(SESSION_NOT_FOUND_RESPONSE);
   } catch (err) {
     console.error('MCP POST error:', err);
     if (!res.headersSent) {
@@ -90,23 +129,34 @@ app.post('/mcp', apiKeyAuthMiddleware, sessionTTL, mcpLimiter, async (req, res) 
 
 app.get('/mcp', apiKeyAuthMiddleware, sessionTTL, mcpLimiter, async (req, res) => {
   const sessionId = req.headers['mcp-session-id'] as string | undefined;
-  if (!sessionId || !sessions.has(sessionId)) {
-    res.status(400).json({ error: 'Missing or invalid session ID' });
+  const sid = sessionId?.slice(0, 8) ?? 'none';
+  console.info(`[req] GET sid=${sid} active=${sessions.size} exists=${sessionId ? sessions.has(sessionId) : 'n/a'}`);
+  const meta = sessionId ? sessions.get(sessionId) : undefined;
+  if (!meta) {
+    console.warn(`[req] GET 404 — active=${sessions.size}`);
+    res.status(404).json(SESSION_NOT_FOUND_RESPONSE);
     return;
   }
   try {
-    await sessions.get(sessionId)!.transport.handleRequest(req, res);
+    await meta.transport.handleRequest(req, res);
   } catch (err) {
-    console.error('MCP GET error:', err);
-    if (!res.headersSent) res.status(500).send('Internal server error');
+    console.error(`[session] transport.handleRequest failed for ${sessionId?.slice(0, 8)}:`, err);
+    meta.transport.close().catch((err) => console.warn('[session] transport.close error:', err));
+    sessions.delete(sessionId!);
+    if (!res.headersSent) {
+      res.status(404).json(SESSION_NOT_FOUND_RESPONSE);
+    }
   }
 });
 
 app.delete('/mcp', apiKeyAuthMiddleware, async (req, res) => {
   const sessionId = req.headers['mcp-session-id'] as string | undefined;
-  if (sessionId && sessions.has(sessionId)) {
-    await sessions.get(sessionId)!.transport.close();
-    sessions.delete(sessionId);
+  const sid = sessionId?.slice(0, 8) ?? 'none';
+  console.info(`[req] DELETE sid=${sid} active=${sessions.size}`);
+  const meta = sessionId ? sessions.get(sessionId) : undefined;
+  if (meta) {
+    await meta.transport.close().catch((err) => console.warn('[session] transport.close error:', err));
+    sessions.delete(sessionId!);
   }
   res.status(204).send();
 });
@@ -115,7 +165,8 @@ app.delete('/mcp', apiKeyAuthMiddleware, async (req, res) => {
 setInterval(() => {
   for (const [id, meta] of sessions) {
     if (Date.now() - meta.createdAt > config.SESSION_TTL_MS) {
-      meta.transport.close().catch(() => {});
+      console.info(`[session] evicting expired session: ${id.slice(0, 8)}`);
+      meta.transport.close().catch((err) => console.warn('[session] transport.close error:', err));
       sessions.delete(id);
     }
   }
