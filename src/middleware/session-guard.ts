@@ -4,7 +4,6 @@ import type { Request, Response, NextFunction } from 'express';
 export interface SessionMeta {
   transport: StreamableHTTPServerTransport;
   createdAt: number;
-  lastUsedAt: number;
 }
 
 export function createSessionTTLMiddleware(
@@ -17,7 +16,8 @@ export function createSessionTTLMiddleware(
 
     const meta = sessions.get(sessionId);
     if (meta && Date.now() - meta.createdAt > ttlMs) {
-      meta.transport.close().catch(() => {});
+      console.info(`[session] TTL expired for session: ${sessionId.slice(0, 8)}`);
+      meta.transport.close().catch((err) => console.warn('[session] transport.close error:', err));
       sessions.delete(sessionId);
       res.status(401).json({
         jsonrpc: '2.0',
@@ -27,7 +27,6 @@ export function createSessionTTLMiddleware(
       return;
     }
 
-    if (meta) meta.lastUsedAt = Date.now();
     next();
   };
 }
